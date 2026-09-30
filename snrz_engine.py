@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Any, Dict, List
 
 @dataclass
 class Candle:
@@ -9,536 +9,391 @@ class Candle:
     low: float
     close: float
 
-# SNRZ-only educational/paper analysis engine.
+def bullish(c): return c.close > c.open
+def bearish(c): return c.close < c.open
+def body(c): return abs(c.close-c.open)
+def rng(c): return max(c.high-c.low,0.0)
 
-def bullish(c: Candle) -> bool:
-    return c.close > c.open
+def avg_range(d,n=14):
+    x=d[-n:]
+    return sum(rng(c) for c in x)/len(x) if x else 0.0
 
-def bearish(c: Candle) -> bool:
-    return c.close < c.open
+def tolerance(d):
+    return max(avg_range(d)*0.35,1e-8)
 
-def body(c: Candle) -> float:
-    return abs(c.close - c.open)
+def bull_engulf(p,c):
+    return bearish(p) and bullish(c) and c.open<=p.close and c.close>=p.open
 
-def candle_range(c: Candle) -> float:
-    return max(c.high - c.low, 0.0)
+def bear_engulf(p,c):
+    return bullish(p) and bearish(c) and c.open>=p.close and c.close<=p.open
 
-def avg_range(data: List[Candle], n: int = 14) -> float:
-    if not data:
-        return 0.0
-    xs = data[-n:]
-    return sum(candle_range(x) for x in xs) / len(xs)
+def bull_pin(c):
+    r=rng(c)
+    if not r:return False
+    lw=min(c.open,c.close)-c.low
+    uw=c.high-max(c.open,c.close)
+    return lw>=body(c)*2 and lw>uw and c.close>=c.low+r*.60
 
-def zone_tolerance(data: List[Candle]) -> float:
-    return max(avg_range(data) * 0.35, 1e-8)
+def bear_pin(c):
+    r=rng(c)
+    if not r:return False
+    uw=c.high-max(c.open,c.close)
+    lw=min(c.open,c.close)-c.low
+    return uw>=body(c)*2 and uw>lw and c.close<=c.low+r*.40
 
-def bullish_engulfing(prev: Candle, cur: Candle) -> bool:
-    return (
-        bearish(prev)
-        and bullish(cur)
-        and cur.open <= prev.close
-        and cur.close >= prev.open
-    )
-
-def bearish_engulfing(prev: Candle, cur: Candle) -> bool:
-    return (
-        bullish(prev)
-        and bearish(cur)
-        and cur.open >= prev.close
-        and cur.close <= prev.open
-    )
-
-def bullish_pin_bar(c: Candle) -> bool:
-    r = candle_range(c)
-    if r <= 0:
-        return False
-
-    lower = min(c.open, c.close) - c.low
-    upper = c.high - max(c.open, c.close)
-
-    return (
-        lower >= body(c) * 2
-        and lower > upper
-        and c.close >= c.low + r * 0.60
-    )
-
-def bearish_pin_bar(c: Candle) -> bool:
-    r = candle_range(c)
-    if r <= 0:
-        return False
-
-    upper = c.high - max(c.open, c.close)
-    lower = min(c.open, c.close) - c.low
-
-    return (
-        upper >= body(c) * 2
-        and upper > lower
-        and c.close <= c.low + r * 0.40
-    )
-
-def confirmation(data: List[Candle]) -> Dict[str, bool]:
-    if len(data) < 2:
-        return {"bullish": False, "bearish": False}
-
-    p, c = data[-2], data[-1]
-
-    return {
-        "bullish": (
-            bullish_engulfing(p, c)
-            or bullish_pin_bar(c)
-        ),
-        "bearish": (
-            bearish_engulfing(p, c)
-            or bearish_pin_bar(c)
-        ),
-    }
-
-def market_structure(data: List[Candle]) -> str:
-    if len(data) < 20:
+def market_structure(d):
+    if len(d)<20:
         return "UNKNOWN"
 
-    w = data[-20:]
-    mid = len(w) // 2
+    a,b=d[-20:-10],d[-10:]
 
-    a, b = w[:mid], w[mid:]
+    ah,al=max(x.high for x in a),min(x.low for x in a)
+    bh,bl=max(x.high for x in b),min(x.low for x in b)
 
-    ah = max(x.high for x in a)
-    al = min(x.low for x in a)
-
-    bh = max(x.high for x in b)
-    bl = min(x.low for x in b)
-
-    if bh > ah and bl > al:
+    if bh>ah and bl>al:
         return "UPTREND (HH/HL candidate)"
 
-    if bh < ah and bl < al:
+    if bh<ah and bl<al:
         return "DOWNTREND (LH/LL candidate)"
 
     return "SIDEWAYS"
 
-def swing_levels(
-    data: List[Candle],
-    lookback: int = 2
-) -> Tuple[List[float], List[float]]:
+def liquidity(d):
+    if len(d)<13:
+        return {
+            "bullish_sweep":False,
+            "bearish_sweep":False,
+            "bullish_run":False,
+            "bearish_run":False
+        }
 
-    highs, lows = [], []
+    c=d[-1]
+    lo=min(x.low for x in d[-12:-1])
+    hi=max(x.high for x in d[-12:-1])
 
-    if len(data) < lookback * 2 + 3:
-        return highs, lows
+    return {
+        "bullish_sweep":c.low<lo and c.close>lo,
+        "bearish_sweep":c.high>hi and c.close<hi,
+        "bullish_run":c.close>hi,
+        "bearish_run":c.close<lo
+    }
 
-    for i in range(
-        lookback,
-        len(data) - lookback
-    ):
-        c = data[i]
+def swings(d,n=2):
+    hs,ls=[],[]
 
-        if c.high >= max(
-            x.high
-            for x in data[
-                i-lookback:i+lookback+1
-            ]
-        ):
-            highs.append(c.high)
+    for i in range(n,len(d)-n):
+        w=d[i-n:i+n+1]
+        c=d[i]
 
-        if c.low <= min(
-            x.low
-            for x in data[
-                i-lookback:i+lookback+1
-            ]
-        ):
-            lows.append(c.low)
+        if c.high>=max(x.high for x in w):
+            hs.append(c.high)
 
-    return highs, lows
+        if c.low<=min(x.low for x in w):
+            ls.append(c.low)
 
-def grouped_zones(
-    data: List[Candle],
-    kind: str,
-    max_zones: int = 6
-) -> List[Dict[str, Any]]:
+    return hs,ls
 
-    highs, lows = swing_levels(data)
-
-    levels = highs if kind == "resistance" else lows
+def zones(d,kind):
+    hs,ls=swings(d)
+    levels=hs if kind=="R" else ls
 
     if not levels:
         return []
 
-    tol = zone_tolerance(data)
-    clusters: List[List[float]] = []
+    t=tolerance(d)
+    clusters=[]
 
-    for level in levels:
-
-        for cluster in clusters:
-
-            if abs(
-                level - sum(cluster) / len(cluster)
-            ) <= tol:
-
-                cluster.append(level)
+    for x in levels:
+        for cl in clusters:
+            if abs(x-sum(cl)/len(cl))<=t:
+                cl.append(x)
                 break
-
         else:
-            clusters.append([level])
+            clusters.append([x])
 
-    clusters.sort(
-        key=lambda c: len(c),
-        reverse=True
-    )
+    clusters.sort(key=len,reverse=True)
 
-    zones = []
+    out=[]
 
-    for cluster in clusters[:max_zones]:
+    for cl in clusters[:6]:
+        p=sum(cl)/len(cl)
 
-        center = sum(cluster) / len(cluster)
+        touches=sum(
+            1 for c in d
+            if c.low<=p+t and c.high>=p-t
+        )
 
-        touches = [
-            i
-            for i, c in enumerate(data)
-            if (
-                c.low <= center + tol
-                and c.high >= center - tol
-            )
-        ]
-
-        zones.append({
-            "type": (
-                "S"
-                if kind == "support"
-                else "R"
-            ),
-            "price": center,
-            "tolerance": tol,
-            "touches": len(touches),
-            "reaction_indices": touches[-6:],
-            "fresh": len(touches) <= 1,
+        out.append({
+            "type":kind,
+            "price":p,
+            "tolerance":t,
+            "touches":touches,
+            "fresh":touches<=1
         })
 
-    return zones
+    return out
 
-def zone_state(
-    data: List[Candle],
-    zone: Dict[str, Any]
-) -> Dict[str, Any]:
+def nearest(d,kind):
+    z=zones(d,kind)
 
-    z = zone["price"]
-    tol = zone["tolerance"]
-    kind = zone["type"]
+    return min(
+        z,
+        key=lambda x:abs(x["price"]-d[-1].close)
+    ) if z else None
 
-    touches = []
-    sweeps = 0
-    closes_outside = 0
-    closes_back_inside = 0
+def zone_touch(d,z):
+    if not z:
+        return False
 
-    for i, c in enumerate(data):
+    p,t=z["price"],z["tolerance"]
+    c=d[-1]
 
-        if (
-            c.low <= z + tol
-            and c.high >= z - tol
-        ):
-            touches.append(i)
+    return c.low<=p+t and c.high>=p-t
 
-        if kind == "S":
+def transitions(d,z):
+    if not z:
+        return []
 
-            if (
-                c.low < z - tol
-                and c.close >= z - tol
-            ):
-                sweeps += 1
+    p,t,k=z["price"],z["tolerance"],z["type"]
+    out=[]
 
-            if c.close < z - tol:
-                closes_outside += 1
+    for a,b in zip(d[:-1],d[1:]):
 
-            if (
-                c.close >= z - tol
-                and c.low < z - tol
-            ):
-                closes_back_inside += 1
+        if k=="S" and a.close>=p-t and b.close<p-t:
+            out.append("SBR")
+
+        if k=="R" and a.close<=p+t and b.close>p+t:
+            out.append("RBS")
+
+    return list(dict.fromkeys(out))
+
+def zone_features(d,z):
+    if not z:
+        return {}
+
+    p,t,k=z["price"],z["tolerance"],z["type"]
+
+    touches=0
+    sweeps=0
+    outside=0
+
+    for c in d:
+
+        if c.low<=p+t and c.high>=p-t:
+            touches+=1
+
+        if k=="S":
+
+            if c.low<p-t and c.close>=p-t:
+                sweeps+=1
+
+            if c.close<p-t:
+                outside+=1
 
         else:
 
-            if (
-                c.high > z + tol
-                and c.close <= z + tol
-            ):
-                sweeps += 1
+            if c.high>p+t and c.close<=p+t:
+                sweeps+=1
 
-            if c.close > z + tol:
-                closes_outside += 1
-
-            if (
-                c.close <= z + tol
-                and c.high > z + tol
-            ):
-                closes_back_inside += 1
+            if c.close>p+t:
+                outside+=1
 
     return {
-        "touches": len(touches),
-        "sweeps": sweeps,
-        "closes_outside": closes_outside,
-        "closes_back_inside": closes_back_inside,
-        "po2": len(touches) >= 2,
-        "fresh": len(touches) <= 1,
+        "touches":touches,
+        "po2":touches>=2,
+        "fresh":touches<=1,
+        "sweeps":sweeps,
+        "false_breakout_candidate":sweeps>0 and outside>0
     }
 
-def detect_sbr_rbs(
-    data: List[Candle],
-    zone: Dict[str, Any]
-) -> Optional[str]:
+def gap_setup(d,z):
+    if len(d)<3 or not z:
+        return False
 
-    z = zone["price"]
-    tol = zone["tolerance"]
-    kind = zone["type"]
+    p=z["price"]
+    t=z["tolerance"]
 
-    for i in range(1, len(data)):
-
-        p, c = data[i-1], data[i]
-
-        if (
-            kind == "S"
-            and p.close >= z - tol
-            and c.close < z - tol
-        ):
-            return "SBR"
+    for a,b,c in zip(
+        d[-12:-2],
+        d[-11:-1],
+        d[-10:]
+    ):
 
         if (
-            kind == "R"
-            and p.close <= z + tol
-            and c.close > z + tol
+            b.low>a.high
+            and abs(b.close-b.open)>avg_range(d)*0.8
+            and abs(p-b.close)<=max(t*3,avg_range(d))
         ):
-            return "RBS"
-
-    return None
-
-def detect_srr_rss(
-    data: List[Candle],
-    zone: Dict[str, Any]
-) -> Optional[str]:
-
-    z = zone["price"]
-    tol = zone["tolerance"]
-    kind = zone["type"]
-
-    breaks = 0
-
-    for i in range(1, len(data)):
-
-        p, c = data[i-1], data[i]
+            return True
 
         if (
-            kind == "S"
-            and p.close >= z - tol
-            and c.close < z - tol
+            b.high<a.low
+            and abs(b.close-b.open)>avg_range(d)*0.8
+            and abs(p-b.close)<=max(t*3,avg_range(d))
         ):
-            breaks += 1
+            return True
 
-        if (
-            kind == "R"
-            and p.close <= z + tol
-            and c.close > z + tol
-        ):
-            breaks += 1
+    return False
 
-    if breaks >= 2:
-        return (
-            "SRR"
-            if kind == "S"
-            else "RSS"
-        )
-
-    return None
-
-def liquidity_events(
-    data: List[Candle]
-) -> Dict[str, bool]:
-
-    if len(data) < 13:
-        return {
-            "bullish_sweep": False,
-            "bearish_sweep": False,
-            "bullish_run": False,
-            "bearish_run": False,
-        }
-
-    cur = data[-1]
-
-    prior_low = min(
-        x.low for x in data[-12:-1]
-    )
-
-    prior_high = max(
-        x.high for x in data[-12:-1]
-    )
-
-    return {
-        "bullish_sweep": (
-            cur.low < prior_low
-            and cur.close > prior_low
-        ),
-
-        "bearish_sweep": (
-            cur.high > prior_high
-            and cur.close < prior_high
-        ),
-
-        "bullish_run": (
-            cur.close > prior_high
-        ),
-
-        "bearish_run": (
-            cur.close < prior_low
-        ),
-    }
-
-def best_zone(
-    data: List[Candle],
-    kind: str
-) -> Optional[Dict[str, Any]]:
-
-    zones = grouped_zones(data, kind)
-
-    if not zones:
+def m1_stayel(m1,kind):
+    if not m1 or len(m1)<2:
         return None
 
-    cur = data[-1].close
+    p,c=m1[-2],m1[-1]
 
-    return min(
-        zones,
-        key=lambda z: abs(
-            z["price"] - cur
-        )
-    )
+    if kind=="S":
+        return bull_engulf(p,c) or bull_pin(c)
 
-def analyze_snrz(
-    data: List[Candle]
-) -> Dict[str, Any]:
+    return bear_engulf(p,c) or bear_pin(c)
 
-    if len(data) < 20:
+def inversion_p02(d,z):
+    if not z:
+        return False
+
+    f=zone_features(d,z)
+
+    if not f["po2"]:
+        return False
+
+    p,t,k=z["price"],z["tolerance"],z["type"]
+
+    for c in d[-8:]:
+
+        if k=="S" and c.close<p-t:
+            return True
+
+        if k=="R" and c.close>p+t:
+            return True
+
+    return False
+
+def validate_zone(d,z,m1=None):
+    if not z:
         return {
-            "signal": "WAIT",
-            "reason": "Not enough candles",
-            "structure": "UNKNOWN",
+            "valid":False,
+            "reasons":[]
         }
 
-    cur = data[-1]
+    k=z["type"]
+    f=zone_features(d,z)
+    tr=transitions(d,z)
 
-    structure = market_structure(data)
-    conf = confirmation(data)
-    liq = liquidity_events(data)
+    reasons=[]
 
-    support = best_zone(
-        data,
-        "support"
-    )
+    if k=="R":
 
-    resistance = best_zone(
-        data,
-        "resistance"
-    )
+        if "SBR" in tr:
+            reasons.append("SBR")
 
-    zones = []
-    buy = []
-    sell = []
+        if f["po2"]:
+            reasons.append("PO2")
 
-    for zone in (
-        support,
-        resistance
-    ):
+        if "SBR" in tr and f["po2"]:
+            reasons.append("RSS candidate")
 
-        if not zone:
-            continue
+        if inversion_p02(d,z):
+            reasons.append("Inversion PO2")
 
-        state = zone_state(
-            data,
-            zone
-        )
+        if f["po2"] and "SBR" in tr:
+            reasons.append("I-VR candidate")
 
-        transition = detect_sbr_rbs(
-            data,
-            zone
-        )
+        if gap_setup(d,z):
+            reasons.append("GAP")
 
-        multi_break = detect_srr_rss(
-            data,
-            zone
-        )
+        m1=m1_stayel(m1,"R")
 
-        z = dict(zone)
-        z.update(state)
+        if m1 is True:
+            reasons.append("M1 Stayel")
 
-        if transition:
+        if f["fresh"]:
+            reasons.append("Fresh")
 
-            z["transition"] = transition
+        return {
+            "valid":bool(reasons),
+            "reasons":list(dict.fromkeys(reasons)),
+            "m1_available":m1 is not None,
+            "touched_now":zone_touch(d,z)
+        }
 
-            z["inversion"] = (
-                "I-VS candidate"
-                if transition == "RBS"
-                else "I-VR candidate"
-            )
+    else:
 
-        if multi_break:
-            z["multi_break"] = multi_break
+        if "RBS" in tr:
+            reasons.append("RBS")
 
-        zones.append(z)
+        if f["po2"]:
+            reasons.append("PO2")
 
-        if (
-            zone["type"] == "S"
-            and state["po2"]
-        ):
-            buy.append("PO2 / Support")
+        if "RBS" in tr and f["po2"]:
+            reasons.append("SRR candidate")
 
-        if (
-            zone["type"] == "R"
-            and state["po2"]
-        ):
-            sell.append("PO2 / Resistance")
+        if inversion_p02(d,z):
+            reasons.append("Inversion PO2")
 
-        if transition == "RBS":
-            buy.append("RBS")
+        if f["po2"] and "RBS" in tr:
+            reasons.append("I-VS candidate")
 
-        if transition == "SBR":
-            sell.append("SBR")
+        if gap_setup(d,z):
+            reasons.append("GAP")
 
-        if multi_break == "SRR":
-            buy.append("SRR")
+        m1=m1_stayel(m1,"S")
 
-        if multi_break == "RSS":
-            sell.append("RSS")
+        if m1 is True:
+            reasons.append("M1 Stayel")
 
-    if (
-        support
-        and zone_state(
-            data,
-            support
-        )["touches"] >= 2
-    ):
+        if f["fresh"]:
+            reasons.append("Fresh")
 
-        if conf["bullish"]:
-            buy.append(
-                "V.S candidate"
-            )
+        return {
+            "valid":bool(reasons),
+            "reasons":list(dict.fromkeys(reasons)),
+            "m1_available":m1 is not None,
+            "touched_now":zone_touch(d,z)
+        }
 
-        if liq["bullish_sweep"]:
-            buy.append(
-                "V.S + Liquidity Sweep"
-            )
+def analyze(d,m1=None):
 
-    if (
-        resistance
-        and zone_state(
-            data,
-            resistance
-        )["touches"] >= 2
-    ):
+    if len(d)<20:
+        return {
+            "signal":"WAIT",
+            "score":0,
+            "structure":"UNKNOWN",
+            "reasons":["Not enough candles"],
+            "zones":[]
+        }
 
-        if conf["bearish"]:
-            sell.append(
-                "V.R candidate"
-            )
+    c=d[-1]
+    prev=d[-2]
 
-        if liq["bearish_sweep"]:
-            sell.append(
-                "V.R + Liquidity Sweep"
-            )
+    st=market_structure(d)
+    liq=liquidity(d)
+
+    bc=bull_engulf(prev,c) or bull_pin(c)
+    sc=bear_engulf(prev,c) or bear_pin(c)
+
+    support=nearest(d,"S")
+    resistance=nearest(d,"R")
+
+    zv=[]
+
+    sv=validate_zone(d,support,m1)
+    rv=validate_zone(d,resistance,m1)
+
+    if support:
+        zv.append({
+            **support,
+            **sv,
+            "direction":"BUY"
+        })
+
+    if resistance:
+        zv.append({
+            **resistance,
+            **rv,
+            "direction":"SELL"
+        })
+
+    buy=list(sv["reasons"]) if support else []
+    sell=list(rv["reasons"]) if resistance else []
 
     if liq["bullish_sweep"]:
         buy.append("Liquidity Sweep")
@@ -546,118 +401,89 @@ def analyze_snrz(
     if liq["bearish_sweep"]:
         sell.append("Liquidity Sweep")
 
-    if liq["bullish_run"]:
-        buy.append("Liquidity Run")
+    if st.startswith("UPTREND"):
+        buy.append("HH/HL")
 
-    if liq["bearish_run"]:
-        sell.append("Liquidity Run")
+    if st.startswith("DOWNTREND"):
+        sell.append("LH/LL")
 
-    if structure.startswith("UPTREND"):
-        buy.append(
-            "Market Structure HH/HL"
-        )
+    if bc:
+        buy.append("Bullish Confirmation")
 
-    if structure.startswith("DOWNTREND"):
-        sell.append(
-            "Market Structure LH/LL"
-        )
+    if sc:
+        sell.append("Bearish Confirmation")
 
-    buy = list(dict.fromkeys(buy))
-    sell = list(dict.fromkeys(sell))
+    buy=list(dict.fromkeys(buy))
+    sell=list(dict.fromkeys(sell))
 
-    signal = "WAIT"
-    reason: Any = {
-        "buy": buy,
-        "sell": sell
-    }
+    # STRICT SNRZ ZONE RULE
+    buy_ok=bool(
+        support
+        and sv["valid"]
+        and sv["touched_now"]
+        and st.startswith("UPTREND")
+        and bc
+    )
 
-    if (
-        structure.startswith("UPTREND")
-        and conf["bullish"]
-        and buy
-    ):
+    sell_ok=bool(
+        resistance
+        and rv["valid"]
+        and rv["touched_now"]
+        and st.startswith("DOWNTREND")
+        and sc
+    )
 
-        signal = "BUY_CANDIDATE"
-        reason = buy
-
-    elif (
-        structure.startswith("DOWNTREND")
-        and conf["bearish"]
-        and sell
-    ):
-
-        signal = "SELL_CANDIDATE"
-        reason = sell
+    signal=(
+        "BUY_CANDIDATE"
+        if buy_ok
+        else "SELL_CANDIDATE"
+        if sell_ok
+        else "WAIT"
+    )
 
     return {
-        "signal": signal,
-        "reason": reason,
-        "structure": structure,
-        "price": cur.close,
+        "signal":signal,
+        "structure":st,
+        "price":c.close,
+        "confirmation":{
+            "bullish":bc,
+            "bearish":sc
+        },
+        "liquidity":liq,
+        "reasons":
+            buy
+            if signal.startswith("BUY")
+            else sell
+            if signal.startswith("SELL")
+            else {
+                "buy":buy,
+                "sell":sell
+            },
+        "zones":zv,
+        "mode":"paper/educational",
+        "method":"SNRZ-only",
+        "rule":
+            "Zone + SNRZ condition + current price touch + "
+            "structure + candle confirmation"
+    }
 
-        "sl_reference": (
-            cur.low
-            if signal == "BUY_CANDIDATE"
-            else cur.high
-            if signal == "SELL_CANDIDATE"
+def multi_timeframe(all_data):
+
+    result={}
+
+    for tf,d in all_data.items():
+
+        m1=(
+            all_data.get("1m")
+            if tf in ("5m","15m")
             else None
-        ),
+        )
 
-        "confirmation": conf,
-        "liquidity": liq,
-        "zones": zones,
-
-        "snrz": {
-            "VS": (
-                "candidate"
-                if "V.S candidate" in buy
-                else False
-            ),
-
-            "VR": (
-                "candidate"
-                if "V.R candidate" in sell
-                else False
-            ),
-
-            "PO2": any(
-                z.get("po2")
-                for z in zones
-            ),
-
-            "RBS": "RBS" in buy,
-            "SBR": "SBR" in sell,
-            "SRR": "SRR" in buy,
-            "RSS": "RSS" in sell,
-
-            "LiquiditySweep": (
-                liq["bullish_sweep"]
-                or liq["bearish_sweep"]
-            ),
-
-            "LiquidityRun": (
-                liq["bullish_run"]
-                or liq["bearish_run"]
-            ),
-        },
-    }
-
-def detect_signal(
-    data: List[Candle]
-) -> Dict[str, Any]:
-    return analyze_snrz(data)
-
-def multi_timeframe(
-    all_data: Dict[str, List[Candle]]
-) -> Dict[str, Any]:
+        result[tf]=analyze(d,m1)
 
     return {
-        "engine": "SNRZ AI V7",
-        "method": "SNRZ-only",
-        "mode": "paper/educational",
-
-        "analysis": {
-            tf: analyze_snrz(data)
-            for tf, data in all_data.items()
-        },
+        "engine":"SNRZ AI V9",
+        "method":"SNRZ-only",
+        "mode":"paper/educational",
+        "analysis":result
     }
