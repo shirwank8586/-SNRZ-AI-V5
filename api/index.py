@@ -40,6 +40,7 @@ async def multi_analysis():
     all_data = {}
     errors = {}
 
+    # 8 timeframes — 1m removed to stay within Basic API limit
     timeframes = [
         "1mo",
         "1w",
@@ -48,8 +49,7 @@ async def multi_analysis():
         "1h",
         "30m",
         "15m",
-        "5m",
-        "1m"
+        "5m"
     ]
 
     for tf in timeframes:
