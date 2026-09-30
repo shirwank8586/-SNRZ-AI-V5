@@ -1,0 +1,765 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from market import candles
+from snrz_engine import Candle, multi_timeframe
+from openai import AsyncOpenAI
+import os
+
+app = FastAPI(
+    title="SNRZ AI V9",
+    version="9.1"
+)
+
+OPENAI_MODEL = os.getenv(
+    "OPENAI_MODEL",
+    "gpt-5.6-luna"
+)
+
+SYSTEM_PROMPT = """
+You are the ChatGPT explanation layer inside SNRZ AI.
+
+This website is SNRZ-only and paper/educational.
+
+Use only the SNRZ concepts represented in the supplied dashboard analysis:
+
+Support (S)
+Resistance (R)
+V.S
+V.R
+I-VS
+I-VR
+SBR
+RBS
+SRR
+RSS
+PO2
+Fresh
+False Breakout
+Liquidity Sweep
+Liquidity Run
+GAP Strategy
+Market Structure
+HH/HL
+LH/LL
+Bullish Engulfing
+Bearish Engulfing
+Bullish Pin Bar
+Bearish Pin Bar
+
+Do not invent missing SNRZ rules.
+
+If the dashboard data does not support a conclusion,
+say what information is missing.
+
+Explain why the engine says:
+
+BUY_CANDIDATE
+SELL_CANDIDATE
+WAIT
+
+Do not claim certainty or guaranteed profit.
+
+Do not execute trades, place orders, connect to brokers,
+or give instructions for real-money execution.
+
+Keep all answers educational and based only on the
+supplied dashboard data.
+"""
+
+
+class AskAIRequest(BaseModel):
+    question: str
+    analysis: dict | None = None
+
+
+HTML = """
+<!doctype html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width,initial-scale=1">
+
+<title>SNRZ AI V9</title>
+
+<style>
+
+body{
+    margin:0;
+    background:#07111f;
+    color:#eaf2ff;
+    font-family:-apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+}
+
+.wrap{
+    max-width:1050px;
+    margin:auto;
+    padding:18px;
+}
+
+h1{
+    margin:0;
+}
+
+.muted{
+    color:#91a4bd;
+}
+
+.card{
+    background:#0d1b2d;
+    border:1px solid #223955;
+    border-radius:16px;
+    padding:16px;
+    margin:14px 0;
+}
+
+.grid{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:10px;
+}
+
+.tf{
+    background:#091524;
+    border:1px solid #20344e;
+    border-radius:12px;
+    padding:12px;
+}
+
+.sig{
+    font-weight:800;
+    margin:8px 0;
+}
+
+.buy{
+    color:#70e59c;
+}
+
+.sell{
+    color:#ff8191;
+}
+
+.wait{
+    color:#cbd5e1;
+}
+
+button{
+    padding:10px 15px;
+    border:0;
+    border-radius:10px;
+    font-weight:700;
+    cursor:pointer;
+}
+
+.price{
+    font-size:32px;
+    font-weight:800;
+}
+
+textarea{
+    width:100%;
+    box-sizing:border-box;
+    min-height:90px;
+    background:#091524;
+    color:#eaf2ff;
+    border:1px solid #29435f;
+    border-radius:12px;
+    padding:12px;
+    font-size:16px;
+}
+
+#answer{
+    white-space:pre-wrap;
+    line-height:1.55;
+    margin-top:12px;
+}
+
+@media(max-width:700px){
+
+    .grid{
+        grid-template-columns:repeat(2,1fr);
+    }
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="wrap">
+
+<h1>SNRZ AI V9</h1>
+
+<div class="muted">
+SNRZ-only • Multi-Timeframe •
+Paper/Educational • ChatGPT
+</div>
+
+
+<div class="card">
+
+<button onclick="load()">
+Refresh
+</button>
+
+<div class="muted">
+XAUUSD
+</div>
+
+<div id="price"
+class="price">
+—
+</div>
+
+</div>
+
+
+<div class="card">
+
+<b>
+Multi-Timeframe Analysis
+</b>
+
+<div id="grid"
+class="grid">
+Loading…
+</div>
+
+</div>
+
+
+<div class="card">
+
+<b>
+🤖 Ask SNRZ AI
+</b>
+
+<div class="muted"
+style="margin:7px 0 12px">
+
+Ask why the dashboard says WAIT
+or what SNRZ condition is missing.
+
+</div>
+
+
+<textarea
+id="question"
+placeholder="Example: Why is 1D WAIT? Which SNRZ confirmation is missing?"
+></textarea>
+
+
+<div style="margin-top:10px">
+
+<button onclick="askAI()">
+Ask ChatGPT
+</button>
+
+</div>
+
+
+<div id="answer">
+</div>
+
+</div>
+
+
+<div class="card">
+
+<div class="muted">
+
+SNRZ concepts used by the engine include
+market structure, confirmation,
+liquidity sweep/run, V.S, V.R,
+RBS, SBR, SRR, RSS and PO2.
+
+A concept is shown as live only when
+the backend detects it.
+
+</div>
+
+</div>
+
+</div>
+
+
+<script>
+
+let latestAnalysis = {};
+
+
+async function load(){
+
+    const grid =
+        document.getElementById("grid");
+
+    try{
+
+        const response =
+            await fetch(
+                "/multi-analysis",
+                {
+                    cache:"no-store"
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if(!response.ok){
+
+            throw Error(
+                data.detail ||
+                "API error"
+            );
+
+        }
+
+        latestAnalysis = data;
+
+        const analysis =
+            data.analysis || {};
+
+        const timeframes =
+            data.timeframes ||
+            Object.keys(analysis);
+
+        let price = null;
+
+
+        grid.innerHTML =
+            timeframes.map(
+                function(tf){
+
+                    const x =
+                        analysis[tf] || {};
+
+                    if(
+                        price === null &&
+                        x.price != null
+                    ){
+
+                        price = x.price;
+
+                    }
+
+
+                    const signal =
+                        x.signal || "WAIT";
+
+
+                    const className =
+                        signal.includes("BUY")
+                        ? "buy"
+                        : signal.includes("SELL")
+                        ? "sell"
+                        : "wait";
+
+
+                    const reason =
+                        Array.isArray(
+                            x.reason
+                        )
+                        ? x.reason.join(" • ")
+                        : "";
+
+
+                    return `
+
+                    <div class="tf">
+
+                        <b>
+                            ${tf.toUpperCase()}
+                        </b>
+
+                        <div
+                            class="sig ${className}">
+                            ${signal.replaceAll(
+                                "_",
+                                " "
+                            )}
+                        </div>
+
+                        <div class="muted">
+                            ${
+                                x.structure ||
+                                "—"
+                            }
+                        </div>
+
+                        <small>
+                            ${
+                                reason ||
+                                "No active confirmation"
+                            }
+                        </small>
+
+                    </div>
+
+                    `;
+
+                }
+            ).join("");
+
+
+        document.getElementById(
+            "price"
+        ).textContent =
+            price === null
+            ? "—"
+            : Number(price).toFixed(2);
+
+
+    }catch(error){
+
+        grid.innerHTML =
+            "<span>" +
+            error.message +
+            "</span>";
+
+    }
+
+}
+
+
+async function askAI(){
+
+    const question =
+        document
+        .getElementById("question")
+        .value
+        .trim();
+
+
+    const answer =
+        document
+        .getElementById("answer");
+
+
+    if(!question){
+
+        answer.textContent =
+            "Write a question first.";
+
+        return;
+
+    }
+
+
+    answer.textContent =
+        "Thinking…";
+
+
+    try{
+
+        const response =
+            await fetch(
+                "/ask-ai",
+                {
+                    method:"POST",
+
+                    headers:{
+                        "Content-Type":
+                        "application/json"
+                    },
+
+                    body:
+                        JSON.stringify({
+
+                            question:
+                                question,
+
+                            analysis:
+                                latestAnalysis
+
+                        })
+
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        if(!response.ok){
+
+            throw Error(
+                data.detail ||
+                "AI request failed"
+            );
+
+        }
+
+
+        answer.textContent =
+            data.answer ||
+            "No answer returned.";
+
+
+    }catch(error){
+
+        answer.textContent =
+            error.message;
+
+    }
+
+}
+
+
+load();
+
+</script>
+
+</body>
+
+</html>
+"""
+
+
+@app.get(
+    "/",
+    response_class=HTMLResponse
+)
+def root():
+
+    return HTML
+
+
+@app.get("/health")
+def health():
+
+    return {
+
+        "ok": True,
+
+        "engine":
+            "SNRZ AI V9",
+
+        "mode":
+            "paper/educational",
+
+        "method":
+            "SNRZ-only",
+
+        "chatgpt":
+            bool(
+                os.getenv(
+                    "OPENAI_API_KEY"
+                )
+            ),
+
+        "status":
+            "online"
+
+    }
+
+
+@app.get("/multi-analysis")
+async def multi_analysis():
+
+    all_data = {}
+
+    errors = {}
+
+    timeframes = [
+
+        "1mo",
+        "1w",
+        "1d",
+        "4h",
+        "1h",
+        "30m",
+        "15m",
+        "5m"
+
+    ]
+
+
+    for tf in timeframes:
+
+        try:
+
+            raw =
+                await candles(
+                    tf,
+                    250
+                )
+
+            all_data[tf] = [
+
+                Candle(**x)
+
+                for x in raw
+
+            ]
+
+        except Exception as e:
+
+            errors[tf] =
+                str(e)
+
+
+    if not all_data:
+
+        raise HTTPException(
+
+            status_code=502,
+
+            detail=
+                "No market data. "
+                "Configure "
+                "TWELVE_DATA_API_KEY "
+                "on the backend."
+
+        )
+
+
+    result =
+        multi_timeframe(
+            all_data
+        )
+
+
+    result.update({
+
+        "engine":
+            "SNRZ AI V9",
+
+        "mode":
+            "paper/educational",
+
+        "method":
+            "SNRZ-only",
+
+        "timeframes":
+            timeframes,
+
+        "errors":
+            errors
+
+    })
+
+
+    return result
+
+
+@app.post("/ask-ai")
+async def ask_ai(
+    req: AskAIRequest
+):
+
+    api_key =
+        os.getenv(
+            "OPENAI_API_KEY"
+        )
+
+
+    if not api_key:
+
+        raise HTTPException(
+
+            status_code=503,
+
+            detail=
+                "OPENAI_API_KEY is "
+                "not configured on "
+                "the backend."
+
+        )
+
+
+    question =
+        req.question.strip()
+
+
+    if not question:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=
+                "Question is empty."
+
+        )
+
+
+    if len(question) > 2000:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=
+                "Question is too long."
+
+        )
+
+
+    client =
+        AsyncOpenAI(
+            api_key=api_key
+        )
+
+
+    context =
+        req.analysis or {}
+
+
+    try:
+
+        response =
+            await client.responses.create(
+
+                model=
+                    OPENAI_MODEL,
+
+                instructions=
+                    SYSTEM_PROMPT,
+
+                input=
+                    "Dashboard analysis JSON:\\n"
+                    + str(context)
+                    + "\\n\\nUser question:\\n"
+                    + question
+
+            )
+
+
+        return {
+
+            "answer":
+                response.output_text,
+
+            "model":
+                OPENAI_MODEL,
+
+            "mode":
+                "paper/educational",
+
+            "method":
+                "SNRZ-only"
+
+        }
+
+
+    except Exception as e:
+
+        raise HTTPException(
+
+            status_code=502,
+
+            detail=
+                "OpenAI request failed: "
+                + str(e)
+
+        )
