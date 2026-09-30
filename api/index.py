@@ -12,6 +12,7 @@ app = FastAPI(
     version="7.0"
 )
 
+
 @app.get("/")
 def root():
     return {
@@ -22,7 +23,8 @@ def root():
         "status": "online"
     }
 
-@app.get("/api/health")
+
+@app.get("/health")
 def health():
     return {
         "ok": True,
@@ -32,7 +34,8 @@ def health():
         "status": "online"
     }
 
-@app.get("/api/multi-analysis")
+
+@app.get("/multi-analysis")
 async def multi_analysis():
     all_data = {}
     errors = {}
