@@ -1,4 +1,10 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json"
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/multi-analysis",
+      "destination": "/api"
+    }
+  ]
 }
 
